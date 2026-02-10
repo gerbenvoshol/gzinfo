@@ -162,8 +162,36 @@ static int inflate_member(FILE *fp, gzip_member_info *m) {
     m->uncompressed_size = out_total;
 
     /* Trailer */
-    uint32_t stored_crc = read_le32(fp);
-    uint32_t isize = read_le32(fp);
+    unsigned char trailer[8];
+    size_t have = strm.avail_in;
+
+    /* First consume from zlib buffer */
+    if (have >= 8) {
+        memcpy(trailer, strm.next_in, 8);
+        strm.next_in += 8;
+        strm.avail_in -= 8;
+    } else {
+        /* Partially buffered: copy what we have */
+        if (have > 0) {
+            memcpy(trailer, strm.next_in, have);
+        }
+        /* Read the rest from file */
+        if (fread(trailer + have, 1, 8 - have, fp) != 8 - have)
+            return -1;
+    }
+
+    uint32_t stored_crc =
+        trailer[0] |
+        (trailer[1] << 8) |
+        (trailer[2] << 16) |
+        (trailer[3] << 24);
+
+    uint32_t isize =
+        trailer[4] |
+        (trailer[5] << 8) |
+        (trailer[6] << 16) |
+        (trailer[7] << 24);
+
 
     m->crc32 = stored_crc;
     m->crc_ok = (stored_crc == crc) && (isize == (out_total & 0xffffffff));
@@ -236,6 +264,41 @@ int analyze_gzip(const char *path, gzip_archive_info *info) {
  * Reporting
  * ========================= */
 
+
+
+static void print_json(const gzip_archive_info *info) {
+    printf("{\n");
+    printf(" \"valid\": %s,\n", info->valid ? "true" : "false");
+    printf(" \"members\": [\n");
+
+
+    for (size_t i = 0; i < info->member_count; i++) {
+        const gzip_member_info *m = &info->members[i];
+        printf(" {\n");
+        printf(" \"compressed_size\": %llu,\n",
+        (unsigned long long)m->compressed_size);
+        printf(" \"uncompressed_size\": %llu,\n",
+        (unsigned long long)m->uncompressed_size);
+        printf(" \"compression_ratio\": %.6f,\n",
+        m->compression_ratio);
+        printf(" \"crc_ok\": %s,\n",
+        m->crc_ok ? "true" : "false");
+        printf(" \"estimated_level\": { \"min\": %d, \"max\": %d },\n",
+        m->estimated_level_min,
+        m->estimated_level_max);
+        printf(" \"filename\": %s,\n",
+        m->filename ? "\"" : "null");
+        if (m->filename)
+            printf("%s\"", m->filename);
+        printf("\n }%s\n",
+        (i + 1 < info->member_count) ? "," : "");
+    }
+
+
+    printf(" ]\n");
+    printf("}\n");
+}
+
 void print_report(const gzip_archive_info *info) {
     printf("GZIP archive analysis\n");
     printf("Members: %zu\n\n", info->member_count);
@@ -271,22 +334,14 @@ void print_report(const gzip_archive_info *info) {
 
 static void usage(const char *prog) {
     fprintf(stderr,
-        "usage: %s [OPTION]... FILE...
-"
-        "  -l, --list        list compressed and uncompressed sizes
-"
-        "  -v, --verbose     verbose analysis output
-"
-        "  -t, --test        test integrity (like gzip -t)
-"
-        "  -j, --json        JSON output
-"
-        "  --deflate         analyze DEFLATE structure
-"
-        "  --strict          fail on trailing or malformed data
-"
-        "  -h, --help        display this help and exit
-",
+        "usage: %s [OPTION]... FILE..."
+        "  -l, --list        list compressed and uncompressed sizes"
+        "  -v, --verbose     verbose analysis output"
+        "  -t, --test        test integrity (like gzip -t)"
+        "  -j, --json        JSON output"
+        "  --deflate         analyze DEFLATE structure"
+        "  --strict          fail on trailing or malformed data"
+        "  -h, --help        display this help and exit",
         prog);
 }
 
@@ -310,8 +365,7 @@ int main(int argc, char **argv) {
             usage(argv[0]);
             return 0;
         } else if (argv[i][0] == '-') {
-            fprintf(stderr, "unknown option: %s
-", argv[i]);
+            fprintf(stderr, "unknown option: %s", argv[i]);
             usage(argv[0]);
             return 2;
         } else
@@ -328,16 +382,14 @@ int main(int argc, char **argv) {
     for (; i < argc; i++) {
         gzip_archive_info info;
         if (analyze_gzip(argv[i], &info) != 0) {
-            fprintf(stderr, "%s: error reading file
-", argv[i]);
+            fprintf(stderr, "%s: error reading file", argv[i]);
             exit_status = 2;
             continue;
         }
 
         if (opt_test) {
             if (!info.valid) {
-                fprintf(stderr, "%s: FAILED
-", argv[i]);
+                fprintf(stderr, "%s: FAILED", argv[i]);
                 exit_status = 1;
             }
             continue;
@@ -354,8 +406,7 @@ int main(int argc, char **argv) {
                 double ratio = mi->uncompressed_size ?
                     100.0 * (1.0 - (double)mi->compressed_size /
                                      mi->uncompressed_size) : 0.0;
-                printf("%10llu %10llu %6.1f%% %s
-",
+                printf("%10llu %10llu %6.1f%% %s",
                        (unsigned long long)mi->compressed_size,
                        (unsigned long long)mi->uncompressed_size,
                        ratio,
